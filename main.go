@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mattn/go-colorable"
+	"github.com/mattn/go-isatty"
 )
 
 // ---- program name ----
@@ -21,52 +25,85 @@ func init() {
 	progName = strings.TrimSuffix(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0]))
 }
 
+// ---- stdout writer ----
+//
+// go-colorable translates ANSI escape codes to Win32 Console API calls on
+// terminals that don't natively support ANSI (e.g. old cmd.exe). On modern
+// terminals and pipes it passes bytes through unchanged.
+
+var stdout io.Writer = colorable.NewColorableStdout()
+
+// ---- color mode ----
+
+// colorMode is resolved once after flags and env vars are parsed.
+var useColor bool
+
+// resolveColor determines whether color output is enabled.
+// Priority (highest wins):
+//  1. --no-color / --color flag
+//  2. NO_COLOR env var (https://no-color.org)
+//  3. WINLS_COLOR=always|never|auto
+//  4. auto: enabled when stdout is a real terminal
+func resolveColor(flagColor, flagNoColor bool) {
+	if flagNoColor {
+		useColor = false
+		return
+	}
+	if flagColor {
+		useColor = true
+		return
+	}
+	if _, set := os.LookupEnv("NO_COLOR"); set {
+		useColor = false
+		return
+	}
+	switch strings.ToLower(os.Getenv("WINLS_COLOR")) {
+	case "always", "yes", "1", "true":
+		useColor = true
+		return
+	case "never", "no", "0", "false":
+		useColor = false
+		return
+	}
+	// auto: use isatty for reliable cross-platform terminal detection
+	useColor = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+}
+
 // ---- ANSI colors ----
 
 const (
-	colorReset  = "\033[0m"
-	colorDir    = "\033[1;34m" // bold blue
-	colorExe    = "\033[1;32m" // bold green
+	colorReset   = "\033[0m"
+	colorDir     = "\033[1;34m" // bold blue
+	colorExe     = "\033[1;32m" // bold green
 	colorSymlink = "\033[1;36m" // bold cyan
-	colorHidden = "\033[2;37m" // dim white
+	colorHidden  = "\033[2;37m" // dim white
 )
-
-var useColor bool
-
-func init() {
-	// Enable color when stdout is a terminal (best-effort on Windows)
-	fi, err := os.Stdout.Stat()
-	if err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
-		useColor = true
-	}
-}
 
 // ---- flags ----
 
 type options struct {
-	long        bool
-	all         bool   // -a: include . and ..
-	almostAll   bool   // -A: include hidden but not . and ..
-	humanSize   bool   // -h
-	recursive   bool   // -R
-	reverse     bool   // -r
-	sortTime    bool   // -t
-	sortSize    bool   // -S
-	onePerLine  bool   // -1
-	dirOnly     bool   // -d
-	classify    bool   // -F: append /  * @ etc.
-	appendSlash bool   // -p: append / to dirs
-	noColor     bool   // --no-color
-	inode       bool   // -i
+	long        bool // -l
+	all         bool // -a: include . and ..
+	almostAll   bool // -A: include hidden but not . and ..
+	humanSize   bool // -h
+	recursive   bool // -R
+	reverse     bool // -r
+	sortTime    bool // -t
+	sortSize    bool // -S
+	onePerLine  bool // -1
+	dirOnly     bool // -d
+	classify    bool // -F: append /  * @ etc.
+	appendSlash bool // -p: append / to dirs
+	inode       bool // -i
 }
 
 // ---- entry ----
 
 type entry struct {
-	name    string
-	path    string
-	info    fs.FileInfo
-	link    string // symlink target, if applicable
+	name string
+	path string
+	info fs.FileInfo
+	link string // symlink target
 }
 
 // ---- helpers ----
@@ -100,7 +137,6 @@ func humanBytes(n int64) string {
 
 func modeString(m fs.FileMode) string {
 	var b [10]byte
-	// file type
 	switch {
 	case m.IsDir():
 		b[0] = 'd'
@@ -154,8 +190,8 @@ func indicator(e entry, opts *options) string {
 	return ""
 }
 
-func colorize(e entry, opts *options, s string) string {
-	if opts.noColor || !useColor {
+func colorize(e entry, s string) string {
+	if !useColor {
 		return s
 	}
 	m := e.info.Mode()
@@ -177,7 +213,7 @@ func displayName(e entry, opts *options) string {
 	if e.info.Mode()&fs.ModeSymlink != 0 && e.link != "" && opts.long {
 		name = name + " -> " + e.link
 	}
-	return colorize(e, opts, name)
+	return colorize(e, name)
 }
 
 // ---- reading a directory ----
@@ -199,50 +235,33 @@ func readEntries(dir string, opts *options) []entry {
 	var entries []entry
 	for _, info := range infos {
 		name := info.Name()
-		hidden := isHidden(name)
-
-		if !opts.all && !opts.almostAll && hidden {
+		if !opts.all && !opts.almostAll && isHidden(name) {
 			continue
 		}
 
 		p := filepath.Join(dir, name)
-
-		// Resolve symlink target for display
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err == nil {
-				link = target
-			}
-			// Re-stat through symlink for accurate info
+			link, _ = os.Readlink(p)
 			if fi, err := os.Stat(p); err == nil {
 				info = fi
 			}
 		}
-
 		entries = append(entries, entry{name: name, path: p, info: info, link: link})
 	}
 
 	if opts.all {
-		// Prepend . and ..
 		dot, _ := os.Lstat(dir)
 		dotdot, _ := os.Lstat(filepath.Dir(dir))
+		var tmp []entry
 		if dot != nil {
-			entries = append([]entry{{name: ".", path: dir, info: dot}}, entries...)
+			tmp = append(tmp, entry{name: ".", path: dir, info: dot})
 		}
 		if dotdot != nil {
-			entries = append([]entry{{name: "..", path: filepath.Dir(dir), info: dotdot}}, entries[1:]...)
-			// re-insert dot first
-			tmp := make([]entry, 0, len(entries)+1)
-			tmp = append(tmp, entry{name: ".", path: dir, info: dot})
 			tmp = append(tmp, entry{name: "..", path: filepath.Dir(dir), info: dotdot})
-			for _, e := range entries {
-				if e.name != "." && e.name != ".." {
-					tmp = append(tmp, e)
-				}
-			}
-			entries = tmp
 		}
+		tmp = append(tmp, entries...)
+		entries = tmp
 	}
 
 	sortEntries(entries, opts)
@@ -254,14 +273,12 @@ func readEntries(dir string, opts *options) []entry {
 func sortEntries(entries []entry, opts *options) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
-		// . and .. always first
 		if a.name == "." || a.name == ".." {
 			return true
 		}
 		if b.name == "." || b.name == ".." {
 			return false
 		}
-
 		var less bool
 		switch {
 		case opts.sortTime:
@@ -281,7 +298,6 @@ func sortEntries(entries []entry, opts *options) {
 // ---- formatting ----
 
 func printLong(entries []entry, opts *options) {
-	// calculate column widths
 	maxSize := 1
 	for _, e := range entries {
 		var s string
@@ -298,14 +314,12 @@ func printLong(entries []entry, opts *options) {
 	now := time.Now()
 	for _, e := range entries {
 		mode := modeString(e.info.Mode())
-
 		var sizeStr string
 		if opts.humanSize {
 			sizeStr = humanBytes(e.info.Size())
 		} else {
 			sizeStr = strconv.FormatInt(e.info.Size(), 10)
 		}
-
 		mt := e.info.ModTime()
 		var timeStr string
 		if now.Year() == mt.Year() {
@@ -313,9 +327,8 @@ func printLong(entries []entry, opts *options) {
 		} else {
 			timeStr = mt.Format("Jan _2  2006")
 		}
-
 		name := displayName(e, opts)
-		fmt.Printf("%s %*s %s %s\n", mode, maxSize, sizeStr, timeStr, name)
+		fmt.Fprintf(stdout, "%s %*s %s %s\n", mode, maxSize, sizeStr, timeStr, name)
 	}
 }
 
@@ -323,11 +336,9 @@ func printColumns(entries []entry, opts *options) {
 	if len(entries) == 0 {
 		return
 	}
-
 	names := make([]string, len(entries))
 	maxLen := 0
 	for i, e := range entries {
-		// strip ANSI for width calculation
 		names[i] = displayName(e, opts)
 		w := utf8.RuneCountInString(stripAnsi(names[i]))
 		if w > maxLen {
@@ -351,19 +362,20 @@ func printColumns(entries []entry, opts *options) {
 			}
 			name := names[idx]
 			pad := colWidth - utf8.RuneCountInString(stripAnsi(name))
-			if col == cols-1 || (col+1)*rows+row >= len(entries) {
-				fmt.Print(name)
+			isLast := col == cols-1 || (col+1)*rows+row >= len(entries)
+			if isLast {
+				fmt.Fprint(stdout, name)
 			} else {
-				fmt.Print(name + strings.Repeat(" ", pad))
+				fmt.Fprint(stdout, name+strings.Repeat(" ", pad))
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(stdout)
 	}
 }
 
 func printOnePerLine(entries []entry, opts *options) {
 	for _, e := range entries {
-		fmt.Println(displayName(e, opts))
+		fmt.Fprintln(stdout, displayName(e, opts))
 	}
 }
 
@@ -378,7 +390,7 @@ func printEntries(entries []entry, opts *options) {
 	}
 }
 
-// ---- ANSI strip (for width calculation) ----
+// ---- ANSI strip (for column width calculation) ----
 
 func stripAnsi(s string) string {
 	var b strings.Builder
@@ -388,7 +400,7 @@ func stripAnsi(s string) string {
 			for i < len(s) && s[i] != 'm' {
 				i++
 			}
-			i++ // consume 'm'
+			i++
 		} else {
 			b.WriteByte(s[i])
 			i++
@@ -400,20 +412,20 @@ func stripAnsi(s string) string {
 // ---- terminal width ----
 
 func terminalWidth() int {
-	// Try $COLUMNS env var first
 	if c := os.Getenv("COLUMNS"); c != "" {
 		if n, err := strconv.Atoi(c); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 80 // safe default
+	return 80
 }
 
 // ---- flag parsing ----
 
-func parseFlags(args []string) (*options, []string) {
+func parseFlags(args []string) (*options, []string, bool, bool) {
 	opts := &options{}
 	var paths []string
+	var flagColor, flagNoColor bool
 
 	i := 0
 	for i < len(args) {
@@ -422,20 +434,19 @@ func parseFlags(args []string) (*options, []string) {
 			paths = append(paths, args[i+1:]...)
 			break
 		}
-		if arg == "--no-color" {
-			opts.noColor = true
+		switch arg {
+		case "--no-color":
+			flagNoColor = true
 			i++
 			continue
-		}
-		if arg == "--color" {
-			opts.noColor = false
+		case "--color":
+			flagColor = true
 			i++
 			continue
-		}
-		if arg == "-h" || arg == "--help" {
+		case "-h", "--help":
 			usage()
 		}
-		if strings.HasPrefix(arg, "-") && len(arg) > 1 && arg != "--" {
+		if strings.HasPrefix(arg, "-") && len(arg) > 1 {
 			for _, ch := range arg[1:] {
 				switch ch {
 				case 'l':
@@ -478,7 +489,7 @@ func parseFlags(args []string) (*options, []string) {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
-	return opts, paths
+	return opts, paths, flagColor, flagNoColor
 }
 
 // ---- listing logic ----
@@ -490,7 +501,6 @@ func listPath(path string, opts *options, showHeader bool) {
 		return
 	}
 
-	// -d: treat directory as a plain entry
 	if opts.dirOnly || !info.IsDir() {
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
@@ -502,7 +512,7 @@ func listPath(path string, opts *options, showHeader bool) {
 	}
 
 	if showHeader {
-		fmt.Printf("%s:\n", path)
+		fmt.Fprintf(stdout, "%s:\n", path)
 	}
 
 	entries := readEntries(path, opts)
@@ -511,7 +521,7 @@ func listPath(path string, opts *options, showHeader bool) {
 	if opts.recursive {
 		for _, e := range entries {
 			if e.info.IsDir() && e.name != "." && e.name != ".." {
-				fmt.Println()
+				fmt.Fprintln(stdout)
 				listPath(e.path, opts, true)
 			}
 		}
@@ -526,21 +536,28 @@ func usage() {
 List directory contents.
 
 Options:
-  -l          Long format: mode, size, date, name
-  -a          Include entries starting with . (including . and ..)
-  -A          Include entries starting with . (excluding . and ..)
-  -h          Human-readable sizes with -l (e.g. 1.2M)
-  -R          Recursively list subdirectories
-  -r          Reverse sort order
-  -t          Sort by modification time (newest first)
-  -S          Sort by file size (largest first)
-  -1          One entry per line
-  -d          List directory itself, not its contents
-  -F          Append type indicator: / dir  * exe  @ symlink
-  -p          Append / to directory names
-  -i          Show inode number (always 0 on Windows)
-  --no-color  Disable color output
-  --color     Enable color output (default when stdout is a terminal)
+  -l            Long format: mode, size, date, name
+  -a            Include entries starting with . (including . and ..)
+  -A            Include entries starting with . (excluding . and ..)
+  -h            Human-readable sizes with -l (e.g. 1.2M)
+  -R            Recursively list subdirectories
+  -r            Reverse sort order
+  -t            Sort by modification time (newest first)
+  -S            Sort by file size (largest first)
+  -1            One entry per line
+  -d            List directory itself, not its contents
+  -F            Append type indicator: / dir  * exe  @ symlink
+  -p            Append / to directory names
+  -i            Show inode number (always 0 on Windows)
+  --color       Force color output on
+  --no-color    Force color output off
+
+Color control (lowest to highest priority):
+  Auto          Enabled when stdout is a terminal, disabled when piped
+  WINLS_COLOR   Set to always, never, or auto
+  NO_COLOR      Set to any value to disable color (https://no-color.org)
+  --color       Force enable
+  --no-color    Force disable
 
 Examples:
   %s
@@ -555,13 +572,9 @@ Examples:
 // ---- main ----
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
-		usage()
-	}
+	opts, paths, flagColor, flagNoColor := parseFlags(os.Args[1:])
+	resolveColor(flagColor, flagNoColor)
 
-	opts, paths := parseFlags(os.Args[1:])
-
-	// Sort paths: files first, then directories
 	var filePaths, dirPaths []string
 	for _, p := range paths {
 		info, err := os.Lstat(p)
@@ -576,7 +589,6 @@ func main() {
 		}
 	}
 
-	// Print files first
 	if len(filePaths) > 0 {
 		var entries []entry
 		for _, p := range filePaths {
@@ -594,16 +606,15 @@ func main() {
 		sortEntries(entries, opts)
 		printEntries(entries, opts)
 		if len(dirPaths) > 0 {
-			fmt.Println()
+			fmt.Fprintln(stdout)
 		}
 	}
 
-	// Print directories
 	showHeader := len(dirPaths) > 1 || len(filePaths) > 0
 	for i, p := range dirPaths {
 		listPath(p, opts, showHeader)
 		if i < len(dirPaths)-1 {
-			fmt.Println()
+			fmt.Fprintln(stdout)
 		}
 	}
 }

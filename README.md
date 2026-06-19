@@ -55,12 +55,14 @@ With no arguments, lists the current directory.
 | `-F` | Append type indicator: `/` dir, `*` executable, `@` symlink |
 | `-p` | Append `/` to directory names |
 | `-i` | Show inode number (always `0` on Windows) |
-| `--no-color` | Disable color output |
-| `--color` | Force color output |
+| `--color` | Force color output on |
+| `--no-color` | Force color output off |
 
 Flags can be combined: `-lhA`, `-lt`, `-lSr`, etc.
 
-## Color coding
+## Color output
+
+Colors work on all Windows terminals including the old Command Prompt (cmd.exe), PowerShell, and Windows Terminal.
 
 | Color | Meaning |
 |-------|---------|
@@ -69,7 +71,15 @@ Flags can be combined: `-lhA`, `-lt`, `-lSr`, etc.
 | Bold cyan | Symbolic link |
 | Dim white | Hidden file |
 
-Color is enabled automatically when stdout is a terminal. Pipe output or use `--no-color` to disable.
+Color is controlled by the following, in order of priority (highest wins):
+
+| Method | Example |
+|--------|---------|
+| `--no-color` flag | `winls --no-color` |
+| `--color` flag | `winls --color` |
+| `NO_COLOR` env var | `set NO_COLOR=1` — disables color ([no-color.org](https://no-color.org)) |
+| `WINLS_COLOR` env var | `set WINLS_COLOR=always` / `never` / `auto` |
+| Auto (default) | Enabled when stdout is a terminal, disabled when piped |
 
 ## Examples
 
