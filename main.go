@@ -569,11 +569,36 @@ Examples:
 	os.Exit(0)
 }
 
+// ---- glob expansion ----
+
+// expandGlobs expands any path argument that contains glob metacharacters.
+// On Windows the shell does not expand globs, so we do it here.
+// Non-glob paths are passed through unchanged (including paths that don't exist,
+// so the normal "cannot access" error is preserved).
+func expandGlobs(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if !strings.ContainsAny(p, "*?[") {
+			out = append(out, p)
+			continue
+		}
+		matches, err := filepath.Glob(p)
+		if err != nil || len(matches) == 0 {
+			// Treat an unmatched glob like a literal path so the caller can warn.
+			out = append(out, p)
+			continue
+		}
+		out = append(out, matches...)
+	}
+	return out
+}
+
 // ---- main ----
 
 func main() {
 	opts, paths, flagColor, flagNoColor := parseFlags(os.Args[1:])
 	resolveColor(flagColor, flagNoColor)
+	paths = expandGlobs(paths)
 
 	var filePaths, dirPaths []string
 	for _, p := range paths {
