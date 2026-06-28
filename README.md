@@ -23,12 +23,20 @@ The binary lands in `%USERPROFILE%\go\bin`, which should already be on your `PAT
 ```powershell
 git clone https://github.com/fermat-tech/winls.git
 cd winls
-go build -o winls.exe .
+go build -ldflags "-X main.version=v1.4.0" -o winls.exe .
 ```
 
-### Download
+Omit the `-ldflags` part for a quick local build; `winls --version` will report `dev`.
 
-Grab the latest binary from [Releases](https://github.com/fermat-tech/winls/releases).
+### Download a pre-built binary
+
+Grab the latest binary from [Releases](https://github.com/fermat-tech/winls/releases), or download directly with PowerShell:
+
+```powershell
+# Replace v1.4.0 with the latest tag shown on the Releases page
+$ver = "v1.4.0"
+Invoke-WebRequest "https://github.com/fermat-tech/winls/releases/download/$ver/winls.exe" -OutFile winls.exe
+```
 
 ## Usage
 
@@ -57,6 +65,7 @@ With no arguments, lists the current directory.
 | `-i` | Show inode number (always `0` on Windows) |
 | `--color` | Force color output on |
 | `--no-color` | Force color output off |
+| `--version` | Print version and exit |
 
 Flags can be combined: `-lhA`, `-lt`, `-lSr`, etc.
 

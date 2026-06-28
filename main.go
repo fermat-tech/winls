@@ -1,3 +1,19 @@
+// winls is a Unix-like ls command for Windows.
+//
+// It lists directory contents with long format, color output, recursive
+// listing, human-readable sizes, and flexible sorting — all the ls flags you
+// already know, working natively on Windows (cmd.exe, PowerShell, and Windows
+// Terminal).
+//
+// Install:
+//
+//	go install github.com/fermat-tech/winls@latest
+//
+// Usage:
+//
+//	winls [OPTIONS] [FILE...]
+//
+// See winls --help for the full option list.
 package main
 
 import (
@@ -16,6 +32,10 @@ import (
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 )
+
+// ---- version (injected by goreleaser / go build -ldflags) ----
+
+var version = "dev"
 
 // ---- program name ----
 
@@ -164,7 +184,7 @@ func modeString(m fs.FileMode) string {
 }
 
 func isHidden(name string) bool {
-	return strings.HasPrefix(name, ".")
+	return strings.HasPrefix(filepath.Base(name), ".")
 }
 
 func isExec(info fs.FileInfo) bool {
@@ -443,6 +463,9 @@ func parseFlags(args []string) (*options, []string, bool, bool) {
 			flagColor = true
 			i++
 			continue
+		case "--version":
+			fmt.Fprintf(os.Stderr, "%s %s\n", progName, version)
+			os.Exit(0)
 		case "-h", "--help":
 			usage()
 		}
@@ -551,6 +574,7 @@ Options:
   -i            Show inode number (always 0 on Windows)
   --color       Force color output on
   --no-color    Force color output off
+  --version     Print version and exit
 
 Color control (lowest to highest priority):
   Auto          Enabled when stdout is a terminal, disabled when piped
@@ -626,7 +650,7 @@ func main() {
 			if info.Mode()&fs.ModeSymlink != 0 {
 				link, _ = os.Readlink(p)
 			}
-			entries = append(entries, entry{name: filepath.Base(p), path: p, info: info, link: link})
+			entries = append(entries, entry{name: p, path: p, info: info, link: link})
 		}
 		sortEntries(entries, opts)
 		printEntries(entries, opts)
