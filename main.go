@@ -405,9 +405,20 @@ func printEntries(entries []entry, opts *options) {
 		printLong(entries, opts)
 	case opts.onePerLine:
 		printOnePerLine(entries, opts)
+	case !stdoutIsTerminal():
+		// Match GNU ls: when output is not a terminal (a pipe or file), default to
+		// one entry per line instead of multi-column. This keeps `ls | while read`
+		// and similar pipelines correct, where columnar output would glue several
+		// names onto one line.
+		printOnePerLine(entries, opts)
 	default:
 		printColumns(entries, opts)
 	}
+}
+
+// stdoutIsTerminal reports whether standard output is an interactive terminal.
+func stdoutIsTerminal() bool {
+	return isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 }
 
 // ---- ANSI strip (for column width calculation) ----
